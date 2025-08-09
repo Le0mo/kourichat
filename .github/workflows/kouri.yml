@@ -1,0 +1,30 @@
+name: Kouri Daily Check-in
+
+on:
+  schedule:
+    # 每天北京时间 10:50 运行 = 每天 02:50 UTC
+    - cron: "50 2 * * *"
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Playwright + Chromium deps
+        run: |
+          pip install playwright
+          python -m playwright install --with-deps chromium
+
+      - name: Run daily check-in
+        env:
+          KOURI_EMAIL: ${{ secrets.KOURI_EMAIL }}
+          KOURI_PASS:  ${{ secrets.KOURI_PASS }}
+        run: python kouri_checkin.py
