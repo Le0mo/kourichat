@@ -1,29 +1,30 @@
 import os
 import sys
-import time
-from typing import Optional
+from pathlib import Path
+from typing import Optional, Tuple, Iterable
 
-from playwright.sync_api import sync_playwright, TimeoutError, Page
+from playwright.sync_api import sync_playwright, TimeoutError, Page, Frame
 
-BASE_URL     = "https://api.kourichat.com"
-LOGIN_URL    = f"{BASE_URL}/login"
-PROFILE_URL  = f"{BASE_URL}/profile"
+BASE_URL    = "https://api.kourichat.com"
+LOGIN_URL   = f"{BASE_URL}/login"
+PROFILE_URL = f"{BASE_URL}/profile"
 
-EMAIL        = os.getenv("KOURI_EMAIL", "").strip()
-PASSWORD     = os.getenv("KOURI_PASS", "").strip()
-DEBUG        = os.getenv("DEBUG", "0").strip()
+EMAIL   = os.getenv("KOURI_EMAIL", "").strip()
+PASSWORD= os.getenv("KOURI_PASS", "").strip()
+DEBUG   = os.getenv("DEBUG", "0").strip()
 
-# 统一超时（毫秒）
-TIMEOUT_MS   = int(os.getenv("TIMEOUT_MS", "20000"))
+TIMEOUT_MS = int(os.getenv("TIMEOUT_MS", "20000"))
 
-# 允许的邮箱域名
 ALLOWED_DOMAINS = {
-    "qq.com", "vip.qq.com", "gmail.com", "outlook.com", "icloud.com",
-    "yahoo.com", "163.com"
+    "qq.com", "vip.qq.com", "gmail.com", "outlook.com",
+    "icloud.com", "yahoo.com", "163.com"
 }
 
 # 退出码：0=成功/已签到；1=凭证缺失/非法；2=登录失败；3=DOM/选择器失败；4=未知异常
 EXIT_OK, EXIT_ENV, EXIT_LOGIN_FAIL, EXIT_DOM, EXIT_UNKNOWN = 0, 1, 2, 3, 4
+
+ART_DIR = Path("artifacts")
+ART_DIR.mkdir(exist_ok=True)
 
 
 def log(level: str, msg: str) -> None:
@@ -31,7 +32,6 @@ def log(level: str, msg: str) -> None:
 
 
 def require_credentials() -> None:
-    """检查凭证与域名白名单。失败时退出 EXIT_ENV。"""
     if not EMAIL or not PASSWORD:
         log("ERROR", "缺少环境变量 KOURI_EMAIL / KOURI_PASS")
         sys.exit(EXIT_ENV)
@@ -45,181 +45,210 @@ def require_credentials() -> None:
         sys.exit(EXIT_ENV)
 
 
-def wait_dom_ready(page: Page) -> None:
-    page.wait_for_load_state("domcontentloaded", timeout=TIMEOUT_MS)
-
-
 def goto(page: Page, url: str) -> None:
     page.goto(url, wait_until="domcontentloaded", timeout=TIMEOUT_MS)
 
 
-def on_login_page(page: Page) -> bool:
-    return "login" in page.url.lower()
+def list_frames(page: Page) -> None:
+    try:
+        log("INFO", f"帧数量：{len(page.frames)}")
+        for i, f in enumerate(page.frames):
+            log("INFO", f"frame[{i}] url={f.url!r} name={f.name!r}")
+    except Exception:
+        pass
+
+
+def possible_toggles() -> Iterable[str]:
+    # 常见需要先点一下的切换项
+    return [
+        "账号登录", "帐户登录", "邮箱登录", "使用密码登录", "密码登录",
+        "邮箱/手机 登录", "账号密码登录",
+        "Email 登录", "Use email", "Use password", "Sign in with password",
+    ]
+
+
+def click_toggles(ctx: Page | Frame) -> None:
+    # 在当前上下文里尽力点一下切换按钮/链接，让输入框显现
+    for text in possible_toggles():
+        try:
+            # 优先 button，再用纯文本
+            btn = ctx.get_by_role("button", name=text)
+            if btn.count() and btn.first.is_visible():
+                btn.first.click(timeout=1500)
+                ctx.wait_for_load_state("domcontentloaded", timeout=TIMEOUT_MS)
+                return
+        except Exception:
+            pass
+        try:
+            link = ctx.get_by_text(text, exact=False)
+            if link.count() and link.first.is_visible():
+                link.first.click(timeout=1500)
+                ctx.wait_for_load_state("domcontentloaded", timeout=TIMEOUT_MS)
+                return
+        except Exception:
+            pass
+
+
+def find_fields(ctx: Page | Frame) -> Tuple[Optional[object], Optional[object]]:
+    """
+    在给定上下文（页面或 iframe）中寻找账号与密码输入框。
+    返回 (account_input, password_input)，任一找不到则返回 None。
+    """
+    ctx.set_default_timeout(TIMEOUT_MS)
+
+    # 先点击可能的切换
+    click_toggles(ctx)
+
+    account_candidates = [
+        ctx.get_by_label("邮箱", exact=False),
+        ctx.get_by_label("电子邮箱", exact=False),
+        ctx.get_by_label("Email", exact=False),
+        ctx.get_by_placeholder("邮箱", exact=False),
+        ctx.get_by_placeholder("邮箱/手机", exact=False),
+        ctx.get_by_placeholder("账号", exact=False),
+        ctx.get_by_placeholder("用户名", exact=False),
+        ctx.get_by_placeholder("手机", exact=False),
+        ctx.get_by_placeholder("Email", exact=False),
+        ctx.locator("input[type='email']"),
+        ctx.locator("input[autocomplete='username']"),
+        ctx.locator("input[name='email']"),
+        ctx.locator("input[name='username']"),
+        ctx.locator("input[name='account']"),
+        ctx.get_by_role("textbox"),
+        ctx.locator("input[type='text']"),
+    ]
+    passwd_candidates = [
+        ctx.get_by_label("密码", exact=False),
+        ctx.get_by_placeholder("密码", exact=False),
+        ctx.locator("input[type='password']"),
+        ctx.locator("input[autocomplete='current-password']"),
+    ]
+
+    account_input = None
+    for cand in account_candidates:
+        try:
+            n = min(cand.count(), 3)
+            for i in range(n):
+                el = cand.nth(i)
+                if el.is_visible() and el.is_enabled():
+                    account_input = el
+                    break
+            if account_input:
+                break
+        except Exception:
+            continue
+
+    passwd_input = None
+    for cand in passwd_candidates:
+        try:
+            n = min(cand.count(), 3)
+            for i in range(n):
+                el = cand.nth(i)
+                if el.is_visible() and el.is_enabled():
+                    passwd_input = el
+                    break
+            if passwd_input:
+                break
+        except Exception:
+            continue
+
+    return account_input, passwd_input
+
+
+def find_fields_anywhere(page: Page) -> Tuple[Optional[object], Optional[object], Optional[Frame]]:
+    """
+    在页面及其所有 iframe 中查找输入框。
+    返回 (account, passwd, frame_used)。若在主页面找到，frame_used 为 None。
+    """
+    # 先在主页面找
+    acc, pwd = find_fields(page)
+    if acc and pwd:
+        return acc, pwd, None
+
+    # 再遍历 iframe
+    for f in page.frames:
+        try:
+            acc, pwd = find_fields(f)
+            if acc and pwd:
+                return acc, pwd, f
+        except Exception:
+            continue
+
+    return None, None, None
 
 
 def fill_login_form(page: Page) -> None:
-    """
-    在 /login 填充并提交表单：
-    - 尝试 role/name/placeholder 等多种定位
-    - 提交后等待网络空闲
-    """
     page.set_default_timeout(TIMEOUT_MS)
 
-    # 尝试找账号输入框
-    account_locators = [
-        page.get_by_role("textbox"),
-        page.locator("input[type='text']"),
-        page.locator("input[name='email']"),
-        page.locator("input[name='username']"),
-        page.locator("input[name='account']"),
-        page.locator("input[autocomplete='username']"),
-        page.get_by_placeholder("邮箱", exact=False),
-        page.get_by_placeholder("邮箱/手机", exact=False),
-        page.get_by_placeholder("账号", exact=False),
-        page.get_by_placeholder("用户名", exact=False),
-        page.get_by_placeholder("手机", exact=False),
-        page.locator("input[placeholder*='Email' i]"),
-    ]
+    # 某些站点会先出人机验证/挑战页
+    for f in page.frames:
+        url = f.url.lower()
+        if any(k in url for k in ["captcha", "challenge", "turnstile", "hcaptcha", "cloudflare"]):
+            log("ERROR", f"检测到可能的人机验证/挑战页（frame: {f.url}），Actions 环境可能无法通过。")
+            raise RuntimeError("遇到人机验证/挑战")
 
-    account = None
-    for cand in account_locators:
+    account_input, passwd_input, used_frame = find_fields_anywhere(page)
+
+    if not account_input or not passwd_input:
+        # 保存证据
         try:
-            # 只检查前几个候选，避免过深遍历
-            count = min(cand.count(), 3)
-            for i in range(count):
-                el = cand.nth(i)
-                if el.is_visible():
-                    account = el
-                    break
-            if account:
-                break
+            page.screenshot(path=str(ART_DIR / "login_not_found.png"), full_page=True)
+            Path(ART_DIR / "login_dom.html").write_text(page.content(), encoding="utf-8")
+            list_frames(page)
         except Exception:
-            continue
-
-    # 密码框
-    passwd_locators = [
-        page.locator("input[type='password']"),
-        page.locator("input[autocomplete='current-password']"),
-        page.get_by_label("密码", exact=False),
-        page.get_by_placeholder("密码", exact=False),
-    ]
-
-    passwd = None
-    for cand in passwd_locators:
-        try:
-            count = min(cand.count(), 3)
-            for i in range(count):
-                el = cand.nth(i)
-                if el.is_visible():
-                    passwd = el
-                    break
-            if passwd:
-                break
-        except Exception:
-            continue
-
-    if not account or not passwd:
+            pass
         raise RuntimeError("未定位到账号或密码输入框")
 
-    account.fill(EMAIL)
-    passwd.fill(PASSWORD)
+    account_input.fill(EMAIL)
+    passwd_input.fill(PASSWORD)
 
-    # 登录按钮
+    # 登录按钮（在相同上下文中点击）
+    ctx: Page | Frame = used_frame if used_frame else page
     login_btn = (
-        page.get_by_role("button", name="登录")
-        .or_(page.get_by_role("button", name="Login"))
-        .or_(page.locator("button[type='submit']"))
-        .or_(page.locator("button:has-text('登录')"))
-        .or_(page.locator("button:has-text('Login')"))
+        ctx.get_by_role("button", name="登录")
+        .or_(ctx.get_by_role("button", name="Login"))
+        .or_(ctx.locator("button[type='submit']"))
+        .or_(ctx.locator("button:has-text('登录')"))
+        .or_(ctx.locator("button:has-text('Login')"))
     )
     try:
         login_btn.first.click(timeout=5000)
     except Exception:
-        # 回车兜底
-        passwd.press("Enter")
+        passwd_input.press("Enter")
 
     # 等待跳转/网络稳定
     page.wait_for_load_state("networkidle", timeout=TIMEOUT_MS)
 
 
-def ensure_logged_in(page: Page) -> None:
-    """
-    从 /login 开始尝试登录；登录后应能访问 /profile。
-    若仍然停留在 /login 或再次被重定向回 /login，则视为登录失败。
-    """
-    goto(page, LOGIN_URL)
-    wait_dom_ready(page)
-
-    if on_login_page(page):
-        log("INFO", f"到达登录页：{page.url}")
-        try:
-            fill_login_form(page)
-        except TimeoutError as e:
-            log("ERROR", f"登录页渲染/等待超时：{e}")
-            sys.exit(EXIT_DOM)
-        except Exception as e:
-            log("ERROR", f"填充登录表单失败：{e}")
-            sys.exit(EXIT_LOGIN_FAIL)
-
-    # 尝试进入个人页校验是否已登录
-    try:
-        goto(page, PROFILE_URL)
-        wait_dom_ready(page)
-    except TimeoutError as e:
-        log("ERROR", f"访问个人页超时：{e}")
-        sys.exit(EXIT_DOM)
-
-    if on_login_page(page):
-        log("ERROR", "登录失败（仍在 /login 或被重定向回登录页）")
-        # 可能是验证码或风控；Actions 环境下常见
-        sys.exit(EXIT_LOGIN_FAIL)
-
-    log("INFO", f"登录成功，当前页面：{page.url}")
-
-
 def detect_already_checked(page: Page) -> bool:
-    """
-    粗略判断是否已签到：
-    - 页面出现“已签到/今日已打卡/已完成”等提示
-    - 按钮不可见或禁用且含“签到”字样
-    """
+    hints = [
+        "已签到", "今日已打卡", "已打卡", "已完成", "已领取",
+        "签到成功", "今日已签到"
+    ]
     try:
-        # 常见提示文本
-        hints = [
-            "已签到", "今日已打卡", "已打卡", "已完成", "已领取",
-            "签到成功", "今日已签到"
-        ]
         for h in hints:
             if page.locator(f"text={h}").first.is_visible():
                 return True
-
-        # 按钮存在但 disabled
         btn_like = page.locator("button:has-text('签到'), button:has-text('打卡')")
         if btn_like.count() > 0:
             first = btn_like.first
             if first.is_visible():
-                # disabled 属性或 aria-disabled
                 disabled = first.get_attribute("disabled") is not None
                 aria_disabled = (first.get_attribute("aria-disabled") or "").lower() in {"true", "1"}
                 if disabled or aria_disabled:
                     return True
     except Exception:
-        # 保守处理：无法判断就返回 False
         return False
     return False
 
 
 def click_checkin(page: Page) -> None:
-    """
-    点击“今日签到打卡”；若找不到按钮，则视为已签或页面改版，打印提示并返回 EXIT_OK。
-    """
     page.set_default_timeout(TIMEOUT_MS)
 
     if detect_already_checked(page):
         log("INFO", "检测到已签到状态（文本提示或按钮禁用）")
         return
 
-    # 主按钮与兜底
     candidates = [
         page.get_by_role("button", name="今日签到打卡"),
         page.locator("button:has-text('今日签到打卡')"),
@@ -227,24 +256,41 @@ def click_checkin(page: Page) -> None:
         page.locator("button:has-text('打卡')"),
     ]
 
-    clicked = False
     for cand in candidates:
         try:
-            if cand.count() > 0:
-                el = cand.first
-                if el.is_visible():
-                    el.click()
-                    clicked = True
-                    break
+            if cand.count() > 0 and cand.first.is_visible():
+                cand.first.click()
+                page.wait_for_timeout(1200)
+                log("INFO", "✅ 已点击：今日签到打卡（或同义按钮）")
+                return
         except Exception:
             continue
 
-    if clicked:
-        # 等一小会儿给后端处理
-        page.wait_for_timeout(1200)
-        log("INFO", "✅ 已点击：今日签到打卡（或同义按钮）")
-    else:
-        log("INFO", "ℹ️ 未找到签到按钮；可能今天已签或页面改版。")
+    log("INFO", "ℹ️ 未找到签到按钮；可能今天已签或页面改版。")
+
+
+def ensure_logged_in(page: Page) -> None:
+    goto(page, LOGIN_URL)
+    page.wait_for_load_state("domcontentloaded", timeout=TIMEOUT_MS)
+    log("INFO", f"到达登录页：{page.url}")
+    list_frames(page)
+
+    try:
+        fill_login_form(page)
+    except TimeoutError as e:
+        log("ERROR", f"登录页渲染/等待超时：{e}")
+        raise
+    except Exception as e:
+        log("ERROR", f"填充登录表单失败：{e}")
+        raise
+
+    # 访问个人页校验是否已登录
+    goto(page, PROFILE_URL)
+    page.wait_for_load_state("domcontentloaded", timeout=TIMEOUT_MS)
+    if "login" in page.url.lower():
+        raise RuntimeError("登录失败（仍在 /login 或被重定向回登录页）")
+
+    log("INFO", f"登录成功，当前页面：{page.url}")
 
 
 def main() -> None:
@@ -256,34 +302,35 @@ def main() -> None:
     try:
         with sync_playwright() as pw:
             browser = pw.chromium.launch(headless=headless, slow_mo=slow_mo)
-            context = browser.new_context()  # 不使用 storage_state，确保每次干净登录
+            context = browser.new_context()  # 每次干净上下文
             page = context.new_page()
 
-            # 登录
             ensure_logged_in(page)
-
-            # 签到
             click_checkin(page)
 
-            # 收尾
             page.close()
             context.close()
             browser.close()
-
             sys.exit(EXIT_OK)
 
     except SystemExit:
         raise
     except TimeoutError as e:
         log("ERROR", f"超时异常：{e}")
+        # 兜底保存证据
+        try:
+            page.screenshot(path=str(ART_DIR / "timeout.png"), full_page=True)
+            Path(ART_DIR / "timeout_dom.html").write_text(page.content(), encoding="utf-8")
+        except Exception:
+            pass
         sys.exit(EXIT_DOM)
     except Exception as e:
         log("ERROR", f"未知异常：{e}")
-        # 输出当前 URL 以便排查
         try:
-            # page 可能未创建成功
             if 'page' in locals():
                 log("INFO", f"最后页面：{page.url}")
+                page.screenshot(path=str(ART_DIR / "unknown.png"), full_page=True)
+                Path(ART_DIR / "unknown_dom.html").write_text(page.content(), encoding="utf-8")
         except Exception:
             pass
         sys.exit(EXIT_UNKNOWN)
