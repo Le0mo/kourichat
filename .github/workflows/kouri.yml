@@ -2,7 +2,7 @@ name: Kouri Daily Check-in
 
 on:
   schedule:
-    # 每天北京时间 23:00 运行 = 每天 15:00 UTC
+    # 每天北京时间 23:00 运行 = 每天 UTC 15:00
     - cron: "0 15 * * *"
   workflow_dispatch:
 
@@ -23,8 +23,32 @@ jobs:
           pip install playwright
           python -m playwright install --with-deps chromium
 
+      - name: Random delay (0~300s)
+        run: sleep $((RANDOM % 301))
+
       - name: Run daily check-in
         env:
           KOURI_EMAIL: ${{ secrets.KOURI_EMAIL }}
           KOURI_PASS:  ${{ secrets.KOURI_PASS }}
         run: python kouri_checkin.py
+
+      # ===== 失败时发邮件通知（Gmail SMTP） =====
+      - name: Send email on failure
+        if: failure()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server:   ${{ secrets.SMTP_SERVER }}
+          port:     ${{ secrets.SMTP_PORT }}
+          secure:   true
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          from:     ${{ secrets.MAIL_FROM }}
+          to:       ${{ secrets.MAIL_TO }}
+          subject:  "Kouri 签到失败：${{ github.repository }} #${{ github.run_number }}"
+          body: |
+            Workflow: ${{ github.workflow }}
+            Repo:     ${{ github.repository }}
+            Run:      https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            Commit:   ${{ github.sha }}
+            Branch:   ${{ github.ref_name }}
+            提示：请打开上面链接查看失败日志。
