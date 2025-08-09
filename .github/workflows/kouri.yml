@@ -22,17 +22,16 @@ jobs:
         run: |
           pip install playwright
           python -m playwright install --with-deps chromium
-
-      - name: Random delay (0~300s)
-        run: sleep $((RANDOM % 301))
+          sudo apt-get update
+          sudo apt-get install -y fonts-noto fonts-noto-cjk
 
       - name: Run daily check-in
         env:
           KOURI_EMAIL: ${{ secrets.KOURI_EMAIL }}
           KOURI_PASS:  ${{ secrets.KOURI_PASS }}
+          DEBUG: "0"
         run: python kouri_checkin.py
 
-      # ===== 失败时发邮件通知（Gmail SMTP） =====
       - name: Send email on failure
         if: failure()
         uses: dawidd6/action-send-mail@v3
