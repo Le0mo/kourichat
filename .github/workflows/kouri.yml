@@ -2,8 +2,8 @@ name: Kouri Daily Check-in
 
 on:
   schedule:
-    # 每天北京时间 10:50 运行 = 每天 02:50 UTC
-    - cron: "50 2 * * *"
+    # 每天北京时间 23:00 运行 = 每天 15:00 UTC
+    - cron: "0 15 * * *"
   workflow_dispatch:
 
 jobs:
