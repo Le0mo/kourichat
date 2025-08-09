@@ -1,0 +1,35 @@
+name: Kouri Daily Check-in (API)
+
+on:
+  schedule:
+    # 每天北京时间 00:40 运行 = 每天 UTC 16:40
+    - cron: "40 16 * * *"
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: pip install requests
+
+      - name: Run API check-in
+        env:
+          KOURI_COOKIE:    ${{ secrets.KOURI_COOKIE }}     # 必填：浏览器整串 Cookie
+          TURNSTILE_TOKEN: ${{ secrets.TURNSTILE_TOKEN }}  # 可选：没有就留空
+          UA:              ${{ secrets.UA }}               # 可选：和你复制 Cookie 时的浏览器 UA 一致
+        run: python kouri_checkin_api.py
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kouri-api-artifacts
+          path: artifacts/**
