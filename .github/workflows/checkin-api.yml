@@ -2,29 +2,47 @@ name: Kouri Daily Check-in (API)
 
 on:
   schedule:
-    # 每天北京时间 00:40 运行 = 每天 UTC 16:40
+    # 北京时间 00:40 = UTC 16:40
     - cron: "40 16 * * *"
   workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kouri-checkin-api
+  cancel-in-progress: false
 
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
 
       - name: Install deps
-        run: pip install requests
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
 
       - name: Run API check-in
         env:
-          KOURI_COOKIE:    ${{ secrets.KOURI_COOKIE }}     # 必填：浏览器整串 Cookie
-          TURNSTILE_TOKEN: ${{ secrets.TURNSTILE_TOKEN }}  # 可选：没有就留空
-          UA:              ${{ secrets.UA }}               # 可选：和你复制 Cookie 时的浏览器 UA 一致
+          # 必填：浏览器里复制的整串 Cookie（以 session= 开头）
+          KOURI_COOKIE:    ${{ secrets.KOURI_COOKIE }}
+          # 推荐：与复制 Cookie 时同一设备/浏览器的 UA
+          UA:              ${{ secrets.UA }}
+          # 可选：若接口需要这些头就配置相应 Secret
+          VOAPI_USER:      ${{ secrets.VOAPI_USER }}
+          ACCEPT_LANGUAGE: ${{ secrets.ACCEPT_LANGUAGE }}
+          TURNSTILE_TOKEN: ${{ secrets.TURNSTILE_TOKEN }}
         run: python kouri_checkin_api.py
 
       - name: Upload artifacts
@@ -33,3 +51,23 @@ jobs:
         with:
           name: kouri-api-artifacts
           path: artifacts/**
+          if-no-files-found: ignore
+
+      - name: Send email on failure
+        if: failure()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server:   ${{ secrets.SMTP_SERVER }}
+          port:     ${{ secrets.SMTP_PORT }}
+          secure:   true
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          from:     ${{ secrets.MAIL_FROM }}
+          to:       ${{ secrets.MAIL_TO }}
+          subject:  "Kouri 签到失败：${{ github.repository }} #${{ github.run_number }}"
+          body: |
+            Workflow: ${{ github.workflow }}
+            Repo:     ${{ github.repository }}
+            Run:      https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            Commit:   ${{ github.sha }}
+            Branch:   ${{ github.ref_name }}
